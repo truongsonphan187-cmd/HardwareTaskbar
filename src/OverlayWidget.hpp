@@ -17,12 +17,14 @@ public:
 
     void UpdateMetrics(const HardwareMetrics& metrics);
     void Reposition();
+    void CheckAndReposition();
 
-    void SetClickThrough(bool enabled);
-    bool IsClickThrough() const { return m_clickThrough; }
-
+    bool IsExplicitlyMoving() const { return m_explicitlyMoving; }
     HWND GetHwnd() const { return m_hWnd; }
-    void ShowContextMenu(POINT pt, uint32_t currentIntervalMs);
+
+    static bool IsWindowAbove(HWND hWndAbove, HWND hWndBelow);
+    bool IsFullScreenActive() const;
+    void CheckFullscreenState();
 
 private:
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -30,20 +32,20 @@ private:
                                      LONG idObject, LONG idChild,
                                      DWORD idEventThread, DWORD dwmsEventTime);
 
-    void Render();
-    void SetupTooltip();
-    void UpdateTooltipText();
+    bool CalculateBounds(int& widgetX, int& widgetY, int& width, int& widgetH, RECT& rcTaskbar, RECT& rcNotify);
+    void Render(bool positionChanged);
 
     HINSTANCE m_hInstance = nullptr;
     HWND m_hWnd = nullptr;
-    HWND m_hWndTooltip = nullptr;
     HWND m_hWndNotifyTarget = nullptr;
     HWINEVENTHOOK m_hWinEventHook = nullptr;
 
     ULONG_PTR m_gdiplusToken = 0;
     bool m_gdiplusInitialized = false;
 
-    bool m_clickThrough = false;
+    bool m_explicitlyMoving = false;
+    bool m_hasInitialPosition = false;
+    bool m_hiddenForFullscreen = false;
     int m_baseWidth = 240;
     int m_baseHeight = 28;
 

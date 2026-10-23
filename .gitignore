@@ -1,0 +1,73 @@
+# ====================================================================
+# Git Ignore for HardwareTaskbar (CMake / C++ / Visual Studio / MSVC)
+# ====================================================================
+
+# Build directories
+build/
+bin/
+out/
+dist/
+x64/
+x86/
+Debug/
+Release/
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+CMakeUserPresets.json
+
+# Visual Studio / MSVC build outputs
+*.obj
+*.o
+*.lib
+*.a
+*.exp
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.res
+*.pch
+*.ipch
+
+# Visual Studio project & solution user-specific files
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.vcxproj.user
+
+# Visual Studio build logs and intermediate tracking
+*.tlog
+*.recipe
+*.lastbuildstate
+*.log
+
+# IDE and Editor configurations
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Windows system files
+[Dd]esktop.ini
+Thumbs.db
+$RECYCLE.BIN/
+
+# Crash dumps
+*.dmp
+*.dump

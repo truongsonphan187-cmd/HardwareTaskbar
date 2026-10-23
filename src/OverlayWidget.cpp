@@ -1,40 +1,14 @@
 #include "OverlayWidget.hpp"
 #include <algorithm>
+#include <shellapi.h>
+#include <dwmapi.h>
 
 #pragma comment(lib, "gdiplus.lib")
-#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 namespace {
     OverlayWidget* g_pWidget = nullptr;
-
-    bool IsAutoStartEnabled() {
-        HKEY hKey = nullptr;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            DWORD type = 0;
-            LONG res = RegQueryValueExW(hKey, L"HardwareTaskbar", nullptr, &type, nullptr, nullptr);
-            RegCloseKey(hKey);
-            return (res == ERROR_SUCCESS);
-        }
-        return false;
-    }
-
-    void ToggleAutoStart() {
-        HKEY hKey = nullptr;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ | KEY_WRITE, &hKey) == ERROR_SUCCESS) {
-            if (IsAutoStartEnabled()) {
-                RegDeleteValueW(hKey, L"HardwareTaskbar");
-            } else {
-                wchar_t exePath[MAX_PATH] = {0};
-                if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
-                    std::wstring cmd = L"\"" + std::wstring(exePath) + L"\"";
-                    RegSetValueExW(hKey, L"HardwareTaskbar", 0, REG_SZ,
-                                  reinterpret_cast<const BYTE*>(cmd.c_str()),
-                                  static_cast<DWORD>((cmd.length() + 1) * sizeof(wchar_t)));
-                }
-            }
-            RegCloseKey(hKey);
-        }
-    }
 }
 
 OverlayWidget::OverlayWidget() {
@@ -45,6 +19,94 @@ OverlayWidget::~OverlayWidget() {
     Destroy();
     if (g_pWidget == this) {
         g_pWidget = nullptr;
+    }
+}
+
+bool OverlayWidget::IsWindowAbove(HWND hWndAbove, HWND hWndBelow) {
+    if (!hWndAbove || !hWndBelow || hWndAbove == hWndBelow) return false;
+    HWND hCur = GetWindow(hWndAbove, GW_HWNDNEXT);
+    while (hCur) {
+        if (hCur == hWndBelow) return true;
+        hCur = GetWindow(hCur, GW_HWNDNEXT);
+    }
+    return false;
+}
+
+bool OverlayWidget::IsFullScreenActive() const {
+    // 1. Shell API user notification state check (detects exclusive D3D fullscreen games and presentation mode)
+    QUERY_USER_NOTIFICATION_STATE state;
+    if (SUCCEEDED(SHQueryUserNotificationState(&state))) {
+        if (state == QUNS_BUSY ||
+            state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+            state == QUNS_PRESENTATION_MODE) {
+            return true;
+        }
+    }
+
+    // 2. Check foreground window bounds against monitor rect (detects borderless windowed games, F11 browser, media players)
+    HWND hWndFg = GetForegroundWindow();
+    if (!hWndFg || hWndFg == m_hWnd) {
+        return false;
+    }
+
+    if (hWndFg == GetDesktopWindow() || hWndFg == GetShellWindow()) {
+        return false;
+    }
+
+    wchar_t className[256] = {};
+    if (GetClassNameW(hWndFg, className, 256)) {
+        if (wcscmp(className, L"Progman") == 0 ||
+            wcscmp(className, L"WorkerW") == 0 ||
+            wcscmp(className, L"Shell_TrayWnd") == 0 ||
+            wcscmp(className, L"Shell_SecondaryTrayWnd") == 0 ||
+            wcscmp(className, L"Windows.UI.Core.CoreWindow") == 0) {
+            return false;
+        }
+    }
+
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    HMONITOR hMonFg = MonitorFromWindow(hWndFg, MONITOR_DEFAULTTONULL);
+    HMONITOR hMonTaskbar = MonitorFromWindow(hTaskbar ? hTaskbar : m_hWnd, MONITOR_DEFAULTTONEAREST);
+
+    if (hMonFg && hMonFg == hMonTaskbar) {
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfoW(hMonFg, &mi)) {
+            RECT rcFg = {};
+            if (GetWindowRect(hWndFg, &rcFg)) {
+                // Window covers or exceeds the taskbar's monitor
+                if (rcFg.left <= mi.rcMonitor.left &&
+                    rcFg.top <= mi.rcMonitor.top &&
+                    rcFg.right >= mi.rcMonitor.right &&
+                    rcFg.bottom >= mi.rcMonitor.bottom) {
+
+                    if (IsWindowVisible(hWndFg) && !IsIconic(hWndFg)) {
+                        DWORD cloaked = 0;
+                        DwmGetWindowAttribute(hWndFg, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+                        if (!cloaked) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+void OverlayWidget::CheckFullscreenState() {
+    if (!m_hWnd || !IsWindow(m_hWnd)) {
+        return;
+    }
+
+    bool isFS = IsFullScreenActive();
+    if (isFS && !m_hiddenForFullscreen) {
+        m_hiddenForFullscreen = true;
+        ShowWindow(m_hWnd, SW_HIDE);
+    } else if (!isFS && m_hiddenForFullscreen) {
+        m_hiddenForFullscreen = false;
+        ShowWindow(m_hWnd, SW_SHOWNOACTIVATE);
+        Reposition();
     }
 }
 
@@ -68,42 +130,46 @@ bool OverlayWidget::Initialize(HINSTANCE hInstance, HWND hWndNotifyTarget) {
         m_gdiplusInitialized = true;
     }
 
-    // Register overlay window class
+    // Register overlay window class (no CS_HREDRAW / CS_VREDRAW, no background brush to prevent any background erase)
     const wchar_t CLASS_NAME[] = L"HardwareTaskbar_OverlayWidgetClass";
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.style = 0;
     wc.lpfnWndProc = OverlayWidget::WndProc;
     wc.hInstance = hInstance;
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = CLASS_NAME;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
 
     RegisterClassExW(&wc);
 
-    // Create layered, transparent, frameless, topmost popup window
+    // Locate Shell_TrayWnd to set it as the owner window
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+
+    // Create the overlay as an OWNED WS_POPUP window:
+    // In Win32, passing hTaskbar as hWndParent for a WS_POPUP window sets Shell_TrayWnd as its owner.
+    // The OS window manager strictly guarantees that an owned window stays ABOVE its owner in Z-order,
+    // preventing the taskbar from hiding the overlay when the user clicks anywhere on the taskbar.
     m_hWnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
         CLASS_NAME,
         L"Hardware Taskbar Overlay",
         WS_POPUP,
         0, 0, 0, 0,
-        nullptr, nullptr, hInstance, this
+        hTaskbar, nullptr, hInstance, this
     );
 
     if (!m_hWnd) {
         return false;
     }
 
-    // Initialize Common Controls for Tooltips
-    INITCOMMONCONTROLSEX icex = {};
-    icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_WIN95_CLASSES;
-    InitCommonControlsEx(&icex);
+    if (hTaskbar) {
+        SetWindowLongPtrW(m_hWnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hTaskbar));
+    }
 
-    SetupTooltip();
-
-    // Hook taskbar location changes to synchronize repositioning
+    // Hook taskbar location changes, foreground focus, and window size changes
     m_hWinEventHook = SetWinEventHook(
-        EVENT_OBJECT_LOCATIONCHANGE,
+        EVENT_SYSTEM_FOREGROUND,
         EVENT_OBJECT_LOCATIONCHANGE,
         nullptr,
         &OverlayWidget::WinEventProc,
@@ -112,8 +178,11 @@ bool OverlayWidget::Initialize(HINSTANCE hInstance, HWND hWndNotifyTarget) {
     );
 
     // Initial render and display
-    Render();
+    Render(true);
     ShowWindow(m_hWnd, SW_SHOWNOACTIVATE);
+
+    // Immediately verify if fullscreen is already active (e.g. game already running)
+    CheckFullscreenState();
 
     return true;
 }
@@ -122,11 +191,6 @@ void OverlayWidget::Destroy() {
     if (m_hWinEventHook) {
         UnhookWinEvent(m_hWinEventHook);
         m_hWinEventHook = nullptr;
-    }
-
-    if (m_hWndTooltip && IsWindow(m_hWndTooltip)) {
-        DestroyWindow(m_hWndTooltip);
-        m_hWndTooltip = nullptr;
     }
 
     if (m_hWnd && IsWindow(m_hWnd)) {
@@ -140,124 +204,28 @@ void OverlayWidget::Destroy() {
     }
 }
 
-void OverlayWidget::SetupTooltip() {
-    m_hWndTooltip = CreateWindowExW(
-        WS_EX_TOPMOST,
-        TOOLTIPS_CLASSW,
-        nullptr,
-        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        m_hWnd, nullptr, m_hInstance, nullptr
-    );
-
-    if (m_hWndTooltip) {
-        SetWindowPos(m_hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-        TOOLINFOW ti = {};
-        ti.cbSize = sizeof(TOOLINFOW);
-        ti.uFlags = TTF_SUBCLASS | TTF_IDISHWND;
-        ti.hwnd = m_hWnd;
-        ti.uId = reinterpret_cast<UINT_PTR>(m_hWnd);
-        ti.lpszText = const_cast<LPWSTR>(L"Hardware Taskbar Monitor");
-
-        SendMessageW(m_hWndTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
-        SendMessageW(m_hWndTooltip, TTM_SETMAXTIPWIDTH, 0, 450);
-        SendMessageW(m_hWndTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 200);
-        SendMessageW(m_hWndTooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 8000);
-    }
-}
-
-void OverlayWidget::UpdateTooltipText() {
-    if (!m_hWndTooltip || !IsWindow(m_hWndTooltip)) {
-        return;
+bool OverlayWidget::CalculateBounds(int& widgetX, int& widgetY, int& width, int& widgetH, RECT& rcTaskbar, RECT& rcNotify) {
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!hTaskbar || !IsWindowVisible(hTaskbar)) {
+        return false;
     }
 
-    wchar_t tipBuf[512] = {0};
-    if (m_lastMetrics.gpu.isAvailable) {
-        if (m_lastMetrics.gpu.vramTotalGb > 0.0) {
-            swprintf_s(tipBuf,
-                L"CPU: %u%% | %s (%u Cores)\n"
-                L"RAM: %.1f / %.1f GB (%u%%)\n"
-                L"GPU: %u%% | %u°C | %s\nVRAM: %.1f / %.1f GB",
-                m_lastMetrics.cpu.usagePercent, m_lastMetrics.cpu.cpuName.c_str(), m_lastMetrics.cpu.logicalCores,
-                m_lastMetrics.ram.usedGb, m_lastMetrics.ram.totalGb, m_lastMetrics.ram.usagePercent,
-                m_lastMetrics.gpu.utilizationPercent, m_lastMetrics.gpu.temperatureC,
-                m_lastMetrics.gpu.deviceName.c_str(), m_lastMetrics.gpu.vramUsedGb, m_lastMetrics.gpu.vramTotalGb
-            );
-        } else {
-            swprintf_s(tipBuf,
-                L"CPU: %u%% | %s (%u Cores)\n"
-                L"RAM: %.1f / %.1f GB (%u%%)\n"
-                L"GPU: %u%% | %u°C | %s",
-                m_lastMetrics.cpu.usagePercent, m_lastMetrics.cpu.cpuName.c_str(), m_lastMetrics.cpu.logicalCores,
-                m_lastMetrics.ram.usedGb, m_lastMetrics.ram.totalGb, m_lastMetrics.ram.usagePercent,
-                m_lastMetrics.gpu.utilizationPercent, m_lastMetrics.gpu.temperatureC,
-                m_lastMetrics.gpu.deviceName.c_str()
-            );
-        }
-    } else {
-        swprintf_s(tipBuf,
-            L"CPU: %u%% | %s (%u Cores)\n"
-            L"RAM: %.1f / %.1f GB (%u%%)\n"
-            L"GPU: Driver Not Detected / NVML Unavailable",
-            m_lastMetrics.cpu.usagePercent, m_lastMetrics.cpu.cpuName.c_str(), m_lastMetrics.cpu.logicalCores,
-            m_lastMetrics.ram.usedGb, m_lastMetrics.ram.totalGb, m_lastMetrics.ram.usagePercent
-        );
+    if (!GetWindowRect(hTaskbar, &rcTaskbar)) {
+        return false;
     }
 
-    TOOLINFOW ti = {};
-    ti.cbSize = sizeof(TOOLINFOW);
-    ti.hwnd = m_hWnd;
-    ti.uId = reinterpret_cast<UINT_PTR>(m_hWnd);
-    ti.lpszText = tipBuf;
-
-    SendMessageW(m_hWndTooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
-}
-
-void OverlayWidget::UpdateMetrics(const HardwareMetrics& metrics) {
-    m_lastMetrics = metrics;
-    Render();
-}
-
-void OverlayWidget::Reposition() {
-    Render();
-}
-
-void OverlayWidget::SetClickThrough(bool enabled) {
-    m_clickThrough = enabled;
-}
-
-void OverlayWidget::Render() {
-    if (!m_hWnd || !IsWindow(m_hWnd) || !m_gdiplusInitialized) {
-        return;
-    }
-
-    // Determine current DPI scaling
     UINT dpi = GetDpiForWindow(m_hWnd);
     if (dpi == 0) dpi = 96;
     float scale = static_cast<float>(dpi) / 96.0f;
 
-    int width = static_cast<int>(m_baseWidth * scale);
+    width = static_cast<int>(m_baseWidth * scale);
     int height = static_cast<int>(m_baseHeight * scale);
 
-    // Locate Windows Taskbar and System Tray
-    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!hTaskbar || !IsWindowVisible(hTaskbar)) {
-        return;
-    }
-
-    RECT rcTaskbar = {};
-    if (!GetWindowRect(hTaskbar, &rcTaskbar)) {
-        return;
-    }
-
     int taskbarH = rcTaskbar.bottom - rcTaskbar.top;
-    int widgetH = std::min(height, taskbarH - 4);
+    widgetH = std::min(height, taskbarH - 4);
     if (widgetH < 22) widgetH = 22;
 
     HWND hTrayNotify = FindWindowExW(hTaskbar, nullptr, L"TrayNotifyWnd", nullptr);
-    RECT rcNotify = {};
     bool hasNotify = false;
     if (hTrayNotify && IsWindowVisible(hTrayNotify)) {
         if (GetWindowRect(hTrayNotify, &rcNotify)) {
@@ -265,9 +233,7 @@ void OverlayWidget::Render() {
         }
     }
 
-    // Compute dock position directly left of the System Tray icons
-    int widgetX = 0;
-    int widgetY = rcTaskbar.top + (taskbarH - widgetH) / 2;
+    widgetY = rcTaskbar.top + (taskbarH - widgetH) / 2;
 
     if (hasNotify && rcNotify.left > rcTaskbar.left) {
         widgetX = rcNotify.left - width - 8;
@@ -279,7 +245,93 @@ void OverlayWidget::Render() {
         widgetX = rcTaskbar.left + 8;
     }
 
-    // Create 32-bit PARGB in-memory canvas
+    return true;
+}
+
+void OverlayWidget::UpdateMetrics(const HardwareMetrics& metrics) {
+    m_lastMetrics = metrics;
+    CheckFullscreenState();
+    if (m_hiddenForFullscreen) {
+        return; // Skip rendering layered window while in fullscreen mode to save CPU/GPU cycles
+    }
+    // Periodic hardware stat refresh: pass positionChanged = false
+    Render(false);
+}
+
+void OverlayWidget::Reposition() {
+    CheckFullscreenState();
+    if (m_hiddenForFullscreen) {
+        return;
+    }
+    Render(true);
+}
+
+void OverlayWidget::CheckAndReposition() {
+    CheckFullscreenState();
+    if (m_hiddenForFullscreen) {
+        return;
+    }
+
+    int widgetX = 0, widgetY = 0, width = 0, widgetH = 0;
+    RECT rcTaskbar = {}, rcNotify = {};
+
+    if (!CalculateBounds(widgetX, widgetY, width, widgetH, rcTaskbar, rcNotify)) {
+        return;
+    }
+
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (hTaskbar && m_hWnd) {
+        // Ensure Shell_TrayWnd remains the registered owner (in case Explorer restarted)
+        HWND hOwner = reinterpret_cast<HWND>(GetWindowLongPtrW(m_hWnd, GWLP_HWNDPARENT));
+        if (hOwner != hTaskbar) {
+            SetWindowLongPtrW(m_hWnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hTaskbar));
+        }
+    }
+
+    // Verify overlay is strictly above Shell_TrayWnd in Z-order
+    bool needZOrderFix = (hTaskbar && !IsWindowAbove(m_hWnd, hTaskbar));
+
+    // Check if taskbar coordinates or widget dock coordinates actually changed or Z-order needs self-healing
+    bool posChanged = (!m_hasInitialPosition ||
+                       needZOrderFix ||
+                       widgetX != m_lastPos.x ||
+                       widgetY != m_lastPos.y ||
+                       width != m_lastSize.cx ||
+                       widgetH != m_lastSize.cy);
+
+    if (!posChanged) {
+        return;
+    }
+
+    // Only reposition when bounds have genuinely changed or Z-order needs self-healing
+    m_lastTaskbarRect = rcTaskbar;
+    m_lastNotifyRect = rcNotify;
+    Render(true);
+}
+
+void OverlayWidget::Render(bool positionChanged) {
+    if (!m_hWnd || !IsWindow(m_hWnd) || !m_gdiplusInitialized || m_hiddenForFullscreen) {
+        return;
+    }
+
+    int widgetX = 0, widgetY = 0, width = 0, widgetH = 0;
+    RECT rcTaskbar = {}, rcNotify = {};
+    if (!CalculateBounds(widgetX, widgetY, width, widgetH, rcTaskbar, rcNotify)) {
+        return;
+    }
+
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (hTaskbar && !IsWindowAbove(m_hWnd, hTaskbar)) {
+        positionChanged = true;
+    }
+
+    // If initial position hasn't been set yet or coordinates moved, mark positionChanged
+    if (!m_hasInitialPosition || widgetX != m_lastPos.x || widgetY != m_lastPos.y ||
+        width != m_lastSize.cx || widgetH != m_lastSize.cy) {
+        positionChanged = true;
+    }
+
+    // Double-buffered 32-bit PARGB in-memory canvas
     HDC hdcScreen = GetDC(nullptr);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
 
@@ -306,6 +358,10 @@ void OverlayWidget::Render() {
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
         g.Clear(Gdiplus::Color(0, 0, 0, 0));
+
+        UINT dpi = GetDpiForWindow(m_hWnd);
+        if (dpi == 0) dpi = 96;
+        float scale = static_cast<float>(dpi) / 96.0f;
 
         // 1. Fluent semi-transparent dark pill background (#141720 with ~85% opacity)
         Gdiplus::REAL r = 7.0f * scale;
@@ -372,98 +428,77 @@ void OverlayWidget::Render() {
         g.DrawString(gpuText.c_str(), -1, &fontVal, rectGpu, &sf, &gpuBrush);
     }
 
-    // 3. Atomically update position and alpha surface
-    POINT ptDest = { widgetX, widgetY };
-    SIZE szDest = { width, widgetH };
     POINT ptSrc = { 0, 0 };
+    SIZE szDest = { width, widgetH };
     BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
 
-    UpdateLayeredWindow(m_hWnd, hdcScreen, &ptDest, &szDest, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
-    SetWindowPos(m_hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (positionChanged) {
+        // Only call SetWindowPos when actual coordinates have changed or Z-order is being restored
+        m_explicitlyMoving = true;
+        SetWindowPos(m_hWnd, HWND_TOPMOST, widgetX, widgetY, width, widgetH,
+                     SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        m_explicitlyMoving = false;
 
-    m_lastPos = ptDest;
-    m_lastSize = szDest;
-    m_lastTaskbarRect = rcTaskbar;
-    m_lastNotifyRect = rcNotify;
+        POINT ptDest = { widgetX, widgetY };
+        UpdateLayeredWindow(m_hWnd, NULL, &ptDest, &szDest, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
 
-    // Clean up GDI handles immediately
+        m_lastPos = ptDest;
+        m_lastSize = szDest;
+        m_lastTaskbarRect = rcTaskbar;
+        m_lastNotifyRect = rcNotify;
+        m_hasInitialPosition = true;
+    } else {
+        // Pass NULL for pptDst so DWM does not recalculate desktop window geometry on every tick
+        UpdateLayeredWindow(m_hWnd, NULL, NULL, &szDest, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
+    }
+
     SelectObject(hdcMem, hOldBmp);
     DeleteObject(hBmp);
     DeleteDC(hdcMem);
     ReleaseDC(nullptr, hdcScreen);
-
-    UpdateTooltipText();
-}
-
-void OverlayWidget::ShowContextMenu(POINT pt, uint32_t currentIntervalMs) {
-    HMENU hMenu = CreatePopupMenu();
-    if (!hMenu) {
-        return;
-    }
-
-    constexpr UINT POS_END = static_cast<UINT>(-1);
-
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING | MF_DISABLED, ID_MENU_HEADER, L"Hardware Taskbar Widget");
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-
-    HMENU hIntervalSub = CreatePopupMenu();
-    InsertMenuW(hIntervalSub, POS_END, MF_BYPOSITION | MF_STRING | (currentIntervalMs == 1000 ? MF_CHECKED : MF_UNCHECKED),
-                ID_MENU_INTERVAL_1S, L"1 Second (Fast)");
-    InsertMenuW(hIntervalSub, POS_END, MF_BYPOSITION | MF_STRING | (currentIntervalMs == 2000 ? MF_CHECKED : MF_UNCHECKED),
-                ID_MENU_INTERVAL_2S, L"2 Seconds (Balanced)");
-    InsertMenuW(hIntervalSub, POS_END, MF_BYPOSITION | MF_STRING | (currentIntervalMs == 5000 ? MF_CHECKED : MF_UNCHECKED),
-                ID_MENU_INTERVAL_5S, L"5 Seconds (Low Power)");
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_POPUP, reinterpret_cast<UINT_PTR>(hIntervalSub), L"Polling Interval");
-
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING | (m_clickThrough ? MF_CHECKED : MF_UNCHECKED),
-                ID_MENU_CLICKTHROUGH, L"Click-Through Mode");
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING, ID_MENU_TASKMGR, L"Open Task Manager");
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING | (IsAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED),
-                ID_MENU_STARTUP, L"Start with Windows");
-
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING, ID_MENU_EXIT, L"Exit");
-
-    SetForegroundWindow(m_hWnd);
-    TrackPopupMenuEx(hMenu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, m_hWnd, nullptr);
-    PostMessageW(m_hWnd, WM_NULL, 0, 0);
-
-    DestroyMenu(hMenu);
 }
 
 LRESULT CALLBACK OverlayWidget::WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        // Handle WM_NCHITTEST and immediately return HTTRANSPARENT
         case WM_NCHITTEST: {
-            if (g_pWidget && g_pWidget->m_clickThrough) {
-                return HTTRANSPARENT;
-            }
-            return HTCLIENT;
+            return HTTRANSPARENT;
         }
 
-        case WM_RBUTTONUP: {
-            if (g_pWidget) {
-                POINT pt;
-                GetCursorPos(&pt);
-                // Forward command to notify target or show menu directly
-                if (g_pWidget->m_hWndNotifyTarget) {
-                    PostMessageW(g_pWidget->m_hWndNotifyTarget, WM_APP_TRAYNOTIFY, 0, WM_RBUTTONUP);
-                } else {
-                    g_pWidget->ShowContextMenu(pt, 1000);
+        // Handle WM_MOUSEACTIVATE and return MA_NOACTIVATE
+        case WM_MOUSEACTIVATE: {
+            return MA_NOACTIVATE;
+        }
+
+        // Handle WM_WINDOWPOSCHANGING: if window is not explicitly being moved by our code,
+        // prevent unwanted Z-order changes UNLESS the overlay is detected behind Shell_TrayWnd
+        case WM_WINDOWPOSCHANGING: {
+            auto* wp = reinterpret_cast<WINDOWPOS*>(lParam);
+            if (wp) {
+                wp->flags |= SWP_NOACTIVATE;
+                if (!g_pWidget || !g_pWidget->IsExplicitlyMoving()) {
+                    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+                    if (hTaskbar && !IsWindowAbove(hWnd, hTaskbar)) {
+                        wp->hwndInsertAfter = HWND_TOPMOST;
+                        wp->flags &= ~SWP_NOZORDER;
+                    } else {
+                        wp->flags |= SWP_NOZORDER;
+                    }
                 }
             }
             return 0;
         }
 
-        case WM_LBUTTONDBLCLK: {
-            ShellExecuteW(nullptr, L"open", L"taskmgr.exe", nullptr, nullptr, SW_SHOWNORMAL);
-            return 0;
+        // Handle WM_ERASEBKGND by returning 1 to prevent background erasing
+        case WM_ERASEBKGND: {
+            return 1;
         }
 
-        case WM_COMMAND: {
-            if (g_pWidget && g_pWidget->m_hWndNotifyTarget) {
-                SendMessageW(g_pWidget->m_hWndNotifyTarget, WM_COMMAND, wParam, lParam);
-            }
+        // Absorb WM_PAINT completely since window is rendered exclusively via UpdateLayeredWindow
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            BeginPaint(hWnd, &ps);
+            EndPaint(hWnd, &ps);
             return 0;
         }
 
@@ -479,13 +514,22 @@ LRESULT CALLBACK OverlayWidget::WndProc(HWND hWnd, UINT message, WPARAM wParam, 
 void CALLBACK OverlayWidget::WinEventProc(HWINEVENTHOOK /*hHook*/, DWORD event, HWND hwnd,
                                         LONG idObject, LONG idChild,
                                         DWORD /*idEventThread*/, DWORD /*dwmsEventTime*/) {
-    if (event == EVENT_OBJECT_LOCATIONCHANGE && idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
+    if (!g_pWidget) return;
+
+    if (event == EVENT_SYSTEM_FOREGROUND) {
+        g_pWidget->CheckFullscreenState();
+        HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+        if (hwnd == hTaskbar) {
+            g_pWidget->CheckAndReposition();
+        }
+    } else if (event == EVENT_OBJECT_LOCATIONCHANGE && idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
         HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
         HWND hNotify = hTaskbar ? FindWindowExW(hTaskbar, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
         if (hwnd == hTaskbar || hwnd == hNotify) {
-            if (g_pWidget) {
-                g_pWidget->Reposition();
-            }
+            g_pWidget->CheckAndReposition();
+        } else {
+            // A window might have toggled fullscreen size (e.g. F11 or video player)
+            g_pWidget->CheckFullscreenState();
         }
     }
 }

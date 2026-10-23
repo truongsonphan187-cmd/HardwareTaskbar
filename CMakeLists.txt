@@ -38,6 +38,7 @@ target_link_libraries(HardwareTaskbar PRIVATE
     advapi32
     comctl32
     pdh
+    dwmapi
 )
 
 # MSVC-specific optimizations, UTF-8 source charset, and DPI manifest embedding

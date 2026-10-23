@@ -60,8 +60,6 @@ namespace {
         InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_POPUP, reinterpret_cast<UINT_PTR>(hIntervalSub), L"Polling Interval");
 
         InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-        InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING | (g_overlayWidget.IsClickThrough() ? MF_CHECKED : MF_UNCHECKED),
-                    ID_MENU_CLICKTHROUGH, L"Click-Through Mode");
         InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING, ID_MENU_TASKMGR, L"Open Task Manager");
         InsertMenuW(hMenu, POS_END, MF_BYPOSITION | MF_STRING | (IsAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED),
                     ID_MENU_STARTUP, L"Start with Windows");
@@ -126,18 +124,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPar
             // Start background worker thread (1000ms default)
             g_hwMonitor.Start(hWnd, 1000);
 
-            // Set periodic timer (500ms) to track animated taskbar repositioning smoothly
-            SetTimer(hWnd, 1, 500, nullptr);
-
             // Trim working set to keep footprint lean (< 10 MB)
             SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
-            return 0;
-        }
-
-        case WM_TIMER: {
-            if (wParam == 1) {
-                g_overlayWidget.Reposition();
-            }
             return 0;
         }
 
@@ -198,9 +186,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPar
                 case ID_MENU_INTERVAL_5S:
                     g_hwMonitor.SetInterval(5000);
                     break;
-                case ID_MENU_CLICKTHROUGH:
-                    g_overlayWidget.SetClickThrough(!g_overlayWidget.IsClickThrough());
-                    break;
                 case ID_MENU_TASKMGR:
                     ShellExecuteW(nullptr, L"open", L"taskmgr.exe", nullptr, nullptr, SW_SHOWNORMAL);
                     break;
@@ -221,7 +206,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPar
         }
 
         case WM_DESTROY: {
-            KillTimer(hWnd, 1);
             g_hwMonitor.Stop();
             g_overlayWidget.Destroy();
             RemoveTrayIcon();
