@@ -46,7 +46,7 @@ private:
     bool m_explicitlyMoving = false;
     bool m_hasInitialPosition = false;
     bool m_hiddenForFullscreen = false;
-    int m_baseWidth = 240;
+    int m_baseWidth = 260;
     int m_baseHeight = 28;
 
     HardwareMetrics m_lastMetrics;

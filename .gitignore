@@ -2,17 +2,20 @@
 # Git Ignore for HardwareTaskbar (CMake / C++ / Visual Studio / MSVC)
 # ====================================================================
 
-# Build directories
+# Build & Output directories
 build/
 bin/
 out/
 dist/
 x64/
 x86/
+ARM64/
 Debug/
 Release/
+RelWithDebInfo/
+MinSizeRel/
 
-# CMake artifacts
+# CMake artifacts & caches
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
@@ -24,7 +27,7 @@ compile_commands.json
 CTestTestfile.cmake
 CMakeUserPresets.json
 
-# Visual Studio / MSVC build outputs
+# Visual Studio / MSVC compilation outputs
 *.obj
 *.o
 *.lib
@@ -39,7 +42,7 @@ CMakeUserPresets.json
 *.pch
 *.ipch
 
-# Visual Studio project & solution user-specific files
+# Visual Studio user-specific & project files
 .vs/
 *.suo
 *.user
@@ -51,23 +54,41 @@ CMakeUserPresets.json
 *.VC.opendb
 *.vcxproj.user
 
-# Visual Studio build logs and intermediate tracking
+# Visual Studio build logs & tracking
 *.tlog
 *.recipe
 *.lastbuildstate
 *.log
 
-# IDE and Editor configurations
+# IDE & Editor configurations
 .vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
+.fleet/
+.vimspector.json
 
-# Windows system files
+# Windows OS system files
 [Dd]esktop.ini
 Thumbs.db
 $RECYCLE.BIN/
+*.lnk
 
-# Crash dumps
+# Crash dumps & profiling
 *.dmp
 *.dump
+*.coverage
+*.coveragexml
+
+# Temporary, scratch & package cache
+scratch/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*~
+
+# Tools & External portable binaries (LibreHardwareMonitor, HWiNFO, etc.)
+tools/
+packages/

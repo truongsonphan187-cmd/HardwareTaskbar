@@ -136,13 +136,18 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPar
 
                 // Update tray tooltip with live summary
                 wchar_t tipBuf[128] = {0};
+                std::wstring cpuTip = L"CPU: " + std::to_wstring(p->cpu.usagePercent) + L"%";
+                std::wstring ramTip = L"RAM: " + std::to_wstring(p->ram.usagePercent) + L"%";
+                std::wstring gpuTip = L"GPU: ";
                 if (p->gpu.isAvailable) {
-                    swprintf_s(tipBuf, L"CPU: %u%% | RAM: %u%% | GPU: %u%%",
-                               p->cpu.usagePercent, p->ram.usagePercent, p->gpu.utilizationPercent);
+                    gpuTip += std::to_wstring(p->gpu.utilizationPercent) + L"%";
+                    if (p->gpu.temperatureC > 0) {
+                        gpuTip += L" (" + std::to_wstring(p->gpu.temperatureC) + L"°C)";
+                    }
                 } else {
-                    swprintf_s(tipBuf, L"CPU: %u%% | RAM: %u%% | GPU: --",
-                               p->cpu.usagePercent, p->ram.usagePercent);
+                    gpuTip += L"--";
                 }
+                swprintf_s(tipBuf, L"%s | %s | %s", cpuTip.c_str(), ramTip.c_str(), gpuTip.c_str());
                 wcscpy_s(g_nid.szTip, tipBuf);
                 Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 

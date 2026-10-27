@@ -421,6 +421,9 @@ void OverlayWidget::Render(bool positionChanged) {
         std::wstring gpuText;
         if (m_lastMetrics.gpu.isAvailable) {
             gpuText = L"GPU " + std::to_wstring(m_lastMetrics.gpu.utilizationPercent) + L"%";
+            if (m_lastMetrics.gpu.temperatureC > 0) {
+                gpuText += L" " + std::to_wstring(m_lastMetrics.gpu.temperatureC) + L"°C";
+            }
         } else {
             gpuText = L"GPU --";
         }
